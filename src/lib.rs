@@ -34,7 +34,7 @@ fn create_jwt(name: String) -> String {
     let sub = caller().to_string();
 
     let now = ic_cdk::api::time() / 1_000_000_000; // Convert nanoseconds to seconds
-    let exp = now + 60 * 60;
+    let exp = now + 60 * 60; // 1 hour expiration
 
     // JWT Header
     let header = json!({
@@ -62,15 +62,21 @@ fn create_jwt(name: String) -> String {
 
     // Convert the DER-encoded signature to raw format (64 bytes)
     let der_bytes = signature.to_der();
-    let (r, s) = {
-        let asn1_sig = Signature::from_der(der_bytes.as_ref()).expect("Invalid DER signature");
-        (asn1_sig.r().to_bytes(), asn1_sig.s().to_bytes())
-    };
+    let asn1_sig = Signature::from_der(der_bytes.as_ref()).expect("Invalid DER signature");
+
+    let mut r_padded = [0u8; 32];
+    let mut s_padded = [0u8; 32];
+
+    // Ensure r and s are padded to 32 bytes
+    let r_bytes = asn1_sig.r().to_bytes();
+    let s_bytes = asn1_sig.s().to_bytes();
+    r_padded[32 - r_bytes.len()..].copy_from_slice(&r_bytes);
+    s_padded[32 - s_bytes.len()..].copy_from_slice(&s_bytes);
 
     // Combine `r` and `s` into a 64-byte raw signature
     let mut raw_signature = [0u8; 64];
-    raw_signature[..32].copy_from_slice(&r.as_slice()[..32]);
-    raw_signature[32..].copy_from_slice(&s.as_slice()[..32]);
+    raw_signature[..32].copy_from_slice(&r_padded);
+    raw_signature[32..].copy_from_slice(&s_padded);
 
     let encoded_signature = encode_config(raw_signature, URL_SAFE_NO_PAD);
 
