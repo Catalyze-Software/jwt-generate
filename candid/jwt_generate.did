@@ -1,6 +1,5 @@
 service : {
   __get_candid_interface_tmp_hack : () -> (text) query;
   create_jwt : (text) -> (text);
-  get_public_key : () -> (text) query;
   validate_jwt : (text) -> (bool) query;
 }

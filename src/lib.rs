@@ -1,5 +1,5 @@
 use base64::{decode_config, encode_config, URL_SAFE_NO_PAD};
-use ic_cdk::{api::management_canister::main::raw_rand, caller, query, update};
+use ic_cdk::{caller, query, update};
 use p256::ecdsa::{
     signature::{Signer, Verifier},
     Signature, SigningKey, VerifyingKey,
@@ -8,7 +8,7 @@ use p256::pkcs8::DecodePrivateKey;
 use serde_json::json;
 
 /// Include the private key PEM file
-const PRIVATE_KEY_PEM: &[u8] = include_bytes!("private_key_pkcs8.pem");
+const PRIVATE_KEY_PEM: &[u8] = include_bytes!("private_key.pem");
 
 /// Parse the private key from the included PEM file.
 fn parse_private_key() -> SigningKey {
@@ -28,18 +28,13 @@ fn get_verifying_key() -> VerifyingKey {
 }
 
 #[update]
-async fn create_jwt(name: String) -> String {
+fn create_jwt(name: String) -> String {
     let secret_key = parse_private_key();
 
-    // Get the caller's Principal ID as the subject
     let sub = caller().to_string();
 
-    let now = ic_cdk::api::time() / 1_000_000_000;
+    let now = ic_cdk::api::time() / 1_000_000_000; // Convert nanoseconds to seconds
     let exp = now + 60 * 60;
-
-    // Generate randomness for the `jti` claim
-    let (raw_randomness,) = raw_rand().await.expect("Failed to get randomness");
-    let jti = base64::encode_config(raw_randomness, URL_SAFE_NO_PAD);
 
     // JWT Header
     let header = json!({
@@ -53,7 +48,6 @@ async fn create_jwt(name: String) -> String {
         "name": name,
         "exp": exp,
         "iat": now,
-        "jti": jti
     });
 
     // Base64URL encode header and payload
@@ -66,8 +60,19 @@ async fn create_jwt(name: String) -> String {
     // Sign the input
     let signature: Signature = secret_key.sign(signing_input.as_bytes());
 
-    // Serialize the signature and Base64URL encode it
-    let encoded_signature = encode_config(signature.to_der().as_ref(), URL_SAFE_NO_PAD);
+    // Convert the DER-encoded signature to raw format (64 bytes)
+    let der_bytes = signature.to_der();
+    let (r, s) = {
+        let asn1_sig = Signature::from_der(der_bytes.as_ref()).expect("Invalid DER signature");
+        (asn1_sig.r().to_bytes(), asn1_sig.s().to_bytes())
+    };
+
+    // Combine `r` and `s` into a 64-byte raw signature
+    let mut raw_signature = [0u8; 64];
+    raw_signature[..32].copy_from_slice(&r.as_slice()[..32]);
+    raw_signature[32..].copy_from_slice(&s.as_slice()[..32]);
+
+    let encoded_signature = encode_config(raw_signature, URL_SAFE_NO_PAD);
 
     // Create the final JWT
     format!(
@@ -97,36 +102,64 @@ fn validate_jwt(jwt: String) -> bool {
         }
     };
 
+    // Ensure the signature is 64 bytes (raw ECDSA format)
+    if signature.len() != 64 {
+        ic_cdk::println!("Invalid signature length: {}", signature.len());
+        return false;
+    }
+
     // Verify the signature
     let public_key = get_verifying_key();
-    match Signature::from_der(&signature) {
+    match Signature::try_from(&signature[..]) {
         Ok(sig) => {
             if public_key.verify(signing_input.as_bytes(), &sig).is_ok() {
-                ic_cdk::println!("JWT is valid");
-                true
+                ic_cdk::println!("Signature is valid");
             } else {
                 ic_cdk::println!("Signature verification failed");
-                false
+                return false;
             }
         }
         Err(_) => {
             ic_cdk::println!("Invalid signature format");
-            false
+            return false;
         }
     }
-}
 
-/// Expose the public key
-#[query]
-fn get_public_key() -> String {
-    let public_key = get_verifying_key();
-    let encoded_point = public_key.to_encoded_point(false);
+    // Decode the payload
+    let payload_json = match decode_config(encoded_payload, URL_SAFE_NO_PAD) {
+        Ok(payload) => match String::from_utf8(payload) {
+            Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    ic_cdk::println!("Failed to parse payload");
+                    return false;
+                }
+            },
+            Err(_) => {
+                ic_cdk::println!("Failed to decode payload");
+                return false;
+            }
+        },
+        Err(_) => {
+            ic_cdk::println!("Failed to decode payload");
+            return false;
+        }
+    };
 
-    // Convert to PEM format
-    format!(
-        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
-        encode_config(encoded_point.as_bytes(), base64::STANDARD)
-    )
+    // Validate expiry
+    if let Some(exp) = payload_json.get("exp").and_then(|e| e.as_u64()) {
+        let now = ic_cdk::api::time() / 1_000_000_000; // Convert nanoseconds to seconds
+        if now > exp {
+            ic_cdk::println!("Token has expired");
+            return false;
+        }
+    } else {
+        ic_cdk::println!("Missing or invalid 'exp' claim");
+        return false;
+    }
+
+    ic_cdk::println!("JWT is valid");
+    true
 }
 
 #[query(name = "__get_candid_interface_tmp_hack")]
