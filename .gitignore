@@ -1,0 +1,24 @@
+wasm/
+# Various IDEs and Editors
+.vscode/
+.idea/
+**/*~
+
+# Mac OSX temporary files
+.DS_Store
+**/.DS_Store
+
+# dfx temporary files
+.dfx/
+target/
+
+# generated files
+src/declarations/
+
+# frontend code
+node_modules/
+dist/
+
+# scripts
+scripts/propose_upgrade_prod.sh
+src/private_key_pkcs8.pem
